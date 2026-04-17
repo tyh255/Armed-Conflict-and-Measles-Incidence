@@ -117,6 +117,6 @@ Email: tozan@nyu.edu
 
 If you use this code, please cite the original manuscript:
 
-> Headley TY, Tozan Y. The association of armed conflict with global measles cases: a structural equation modeling analysis of 193 countries from 2000 to 2023. *PLOS Medicine*. 2025.
+> Headley TY, Tozan Y. The association of armed conflict with global measles cases: a structural equation modeling analysis of 193 countries from 2000 to 2023. *PLOS Medicine*. 2026.
 
 ---
