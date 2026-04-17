@@ -1,0 +1,491 @@
+# =============================================================================
+# REPLICATION CODE: "The Association of Armed Conflict with Global Measles Cases:
+# A Structural Equation Modeling Analysis of 193 Countries from 2000 to 2023"
+# Headley TY & Tozan Y | PLOS Medicine
+#
+# This script replicates:
+#   - Primary SEM models A-D (Table 3)
+#   - Fixed-effects panel regressions (Table 2)
+#   - First-difference SEM (S10 Table)
+#   - Extended 3-year lag SEM + Wald tests (S11 Table)
+#
+# REQUIREMENTS:
+#   Input files (place in ./data/ subdirectory):
+#     - vaccination_thresholds.csv
+#     - WHO Measles Incidence.csv
+#     - WHO_Measles Case Incidence_Per Million.csv
+#     - IHME Measles Incidence.csv
+#     - hdr-data.csv
+#     - WB_Health Expenditures.csv
+#     - WB_TB Incidence Rate.csv
+#     - UNHCR_persons_of_concern.csv
+#
+#   R packages: dplyr, tidyr, tidyverse, lavaan, semTools, purrr, plm, lmtest
+# =============================================================================
+
+library(dplyr)
+library(tidyr)
+library(tidyverse)
+library(lavaan)
+library(semTools)
+library(purrr)
+library(plm)
+library(lmtest)
+
+# =============================================================================
+# SECTION 1: DATA PREPARATION
+# =============================================================================
+
+# --- 1.1 Load and reshape base dataset ---
+semds <- read.csv('./data/vaccination_thresholds.csv')
+
+semds <- semds %>%
+  group_by(Country, Country.Code, Year) %>%
+  summarise(
+    mean_coverage    = mean(Coverage, na.rm = TRUE),
+    MCV1             = mean(Coverage[vaccine == "MCV1"], na.rm = TRUE),
+    MCV2             = mean(Coverage[vaccine == "MCV2"], na.rm = TRUE),
+    GDP_per_capita   = first(GDP_per_capita),
+    bd_best          = first(bd_best),
+    intensity_level  = first(intensity_level),
+    Population       = first(Population),
+    displaced_pct    = first(displaced_pct_new)
+  ) %>%
+  ungroup()
+
+# --- 1.2 WHO measles case counts ---
+who_measles <- read.csv('./data/WHO Measles Incidence.csv')
+
+# Harmonise country names
+who_measles$Country...Region[who_measles$Country...Region == "Côte d'Ivoire"]         <- "Cote d'Ivoire"
+who_measles$Country...Region[who_measles$Country...Region == "occupied Palestinian territory, including east Jerusalem"] <- "State of Palestine"
+who_measles$Country...Region[who_measles$Country...Region == "Türkiye"]               <- "Turkiye"
+who_measles$Country...Region[who_measles$Country...Region == "United Kingdom of Great Britain and Northern Ireland"] <- "United Kingdom"
+who_measles$Country...Region[who_measles$Country...Region == "United States of America"] <- "United States"
+
+who_measles_long <- who_measles %>%
+  pivot_longer(cols = starts_with("X"), names_to = "Year", values_to = "Incidence") %>%
+  mutate(Year = as.integer(str_extract(Year, "\\d{4}")),
+         Incidence = as.numeric(str_remove(Incidence, ",")))
+colnames(who_measles_long)[c(1, 3, 4)] <- c("Country", "Year", "Incidence")
+
+semds <- semds %>%
+  left_join(who_measles_long %>% select(Country, Year, Incidence), by = c("Country", "Year"))
+
+# --- 1.3 WHO measles incidence rate (per million) ---
+who_measles_i <- read.csv('./data/WHO_Measles Case Incidence_Per Million.csv')
+
+who_measles_i$Country...Region[who_measles_i$Country...Region == "Côte d'Ivoire"]    <- "Cote d'Ivoire"
+who_measles_i$Country...Region[who_measles_i$Country...Region == "occupied Palestinian territory, including east Jerusalem"] <- "State of Palestine"
+who_measles_i$Country...Region[who_measles_i$Country...Region == "Türkiye"]          <- "Turkiye"
+who_measles_i$Country...Region[who_measles_i$Country...Region == "United Kingdom of Great Britain and Northern Ireland"] <- "United Kingdom"
+who_measles_i$Country...Region[who_measles_i$Country...Region == "United States of America"] <- "United States"
+
+who_measles_long_i <- who_measles_i %>%
+  mutate(across(starts_with("X"), as.character)) %>%
+  pivot_longer(cols = starts_with("X"), names_to = "Year", values_to = "Incidence_Rate_1M") %>%
+  mutate(Year = as.integer(str_extract(Year, "\\d{4}")),
+         Incidence_Rate_1M = as.numeric(Incidence_Rate_1M))
+colnames(who_measles_long_i)[c(1, 3, 4)] <- c("Country", "Year", "Incidence_Rate_1M")
+
+semds <- semds %>%
+  left_join(who_measles_long_i %>% select(Country, Year, Incidence_Rate_1M),
+            by = c("Country", "Year"), relationship = "many-to-many")
+
+# --- 1.4 IHME measles incidence ---
+ihme_measles <- read.csv('./data/IHME Measles Incidence.csv')
+
+ihme_measles$location_name[ihme_measles$location_name == "Côte d'Ivoire"]            <- "Cote d'Ivoire"
+ihme_measles$location_name[ihme_measles$location_name == "Palestine"]                <- "State of Palestine"
+ihme_measles$location_name[ihme_measles$location_name == "Turkey"]                   <- "Turkiye"
+ihme_measles$location_name[ihme_measles$location_name == "United States of America"] <- "United States"
+
+ihme_wide <- ihme_measles %>%
+  filter(age_name == "All ages", sex_name == "Both", measure_name == "Incidence") %>%
+  select(location_name, year, metric_name, val) %>%
+  pivot_wider(names_from = metric_name, values_from = val)
+
+semds <- semds %>%
+  left_join(ihme_wide, by = c("Country" = "location_name", "Year" = "year"))
+
+# --- 1.5 HDI indicators (life expectancy, mean years schooling) ---
+hdi <- read.csv('./data/hdr-data.csv')
+
+hdi_wide <- hdi %>%
+  select(countryIsoCode, year, indicatorCode, value) %>%
+  pivot_wider(names_from = indicatorCode, values_from = value)
+
+semds <- semds %>%
+  left_join(hdi_wide, by = c("Country.Code" = "countryIsoCode", "Year" = "year"))
+
+# --- 1.6 World Bank: health expenditure and TB incidence ---
+wbh <- read.csv('./data/WB_Health Expenditures.csv')
+wbh <- wbh[wbh$Series.Name == "Current health expenditure (% of GDP)", ]
+
+wbh_long <- wbh %>%
+  pivot_longer(cols = starts_with("X"), names_to = "Year", values_to = "health_exp_gdp") %>%
+  mutate(Year = as.integer(gsub("X([0-9]{4}).*", "\\1", Year)),
+         health_exp_gdp = as.numeric(health_exp_gdp)) %>%
+  select(Country.Code, Year, health_exp_gdp)
+
+wbtb <- read.csv('./data/WB_TB Incidence Rate.csv')
+
+wbtb_long <- wbtb %>%
+  pivot_longer(cols = starts_with("X"), names_to = "Year", values_to = "tb_incidence") %>%
+  mutate(Year = as.integer(gsub("X([0-9]{4}).*", "\\1", Year)),
+         tb_incidence = as.numeric(tb_incidence)) %>%
+  select(Country.Code, Year, tb_incidence)
+
+semds <- semds %>%
+  left_join(wbh_long,  by = c("Country.Code", "Year")) %>%
+  left_join(wbtb_long, by = c("Country.Code", "Year"))
+
+# --- 1.7 UNHCR displacement totals ---
+un_disp <- read.csv('./data/UNHCR_persons_of_concern.csv')
+un_disp$New_Displacement_Total <- un_disp$Refugees + un_disp$Asylum.seekers +
+  un_disp$IDPs + un_disp$Others.of.concern
+un_disp <- un_disp %>% rename(Country.Code = Country.of.Origin.ISO)
+
+semds <- semds %>%
+  left_join(un_disp %>% select(Country.Code, Year, New_Displacement_Total),
+            by = c("Country.Code", "Year"))
+semds$displaced_pct_new <- semds$New_Displacement_Total / semds$Population
+
+# --- 1.8 Create analysis subset ---
+semds_subset <- semds %>%
+  select(
+    country.code                 = Country.Code,
+    year                         = Year,
+    mean_coverage,
+    total_displacement           = New_Displacement_Total,
+    gdp_per_capita               = GDP_per_capita,
+    battle_deaths                = bd_best,
+    population                   = Population,
+    displaced_pct                = displaced_pct_new,
+    wb_measles_incidence         = Incidence,
+    wb_measles_incidence_rate_1M = Incidence_Rate_1M,
+    ihme_measles_incidence       = Number,
+    ihme_measles_rate            = Rate,
+    life_expectancy              = le,
+    mean_years_schooling         = mys,
+    health_portion_gdp           = health_exp_gdp,
+    MCV1,
+    wb_tb_incidence              = tb_incidence
+  ) %>%
+  distinct(country.code, year, .keep_all = TRUE)
+
+# --- 1.9 Standardize variables ---
+semds_std <- semds_subset %>%
+  mutate(
+    # log1p-transform skewed count variables, then z-score
+    across(
+      c(total_displacement, gdp_per_capita, battle_deaths,
+        population, wb_measles_incidence, wb_measles_incidence_rate_1M,
+        ihme_measles_incidence, wb_tb_incidence),
+      ~ scale(log1p(.x))[, 1],
+      .names = "{.col}_z"
+    ),
+    # z-score continuous/rate variables
+    across(
+      c(displaced_pct, ihme_measles_rate, life_expectancy,
+        mean_years_schooling, health_portion_gdp, mean_coverage, MCV1),
+      ~ scale(.x)[, 1],
+      .names = "{.col}_z"
+    )
+  )
+
+# --- 1.10 Create lagged variables ---
+semds_std <- semds_std %>%
+  group_by(country.code) %>%
+  arrange(year, .by_group = TRUE) %>%
+  mutate(
+    battle_deaths_z_lag1                   = dplyr::lag(battle_deaths_z, 1),
+    wb_incidence_z_lag1                    = dplyr::lag(wb_measles_incidence_z, 1),
+    wb_measles_incidence_rate_1M_z_lag1    = dplyr::lag(wb_measles_incidence_rate_1M_z, 1),
+    displaced_pct_lag1                     = dplyr::lag(displaced_pct_z, 1)
+  ) %>%
+  ungroup()
+
+
+# =============================================================================
+# SECTION 2: HELPER FUNCTION FOR SEM EXTRACTION
+# =============================================================================
+
+# Fits a SEM and returns standardized coefficients with 95% CIs, p-values,
+# and robust fit indices (CFI, TLI, RMSEA, SRMR, AIC, BIC).
+
+extract_sem_results <- function(model_syntax, model_name, data,
+                                cluster_var = NULL) {
+  fit <- sem(
+    model_syntax,
+    data      = data,
+    missing   = "fiml",
+    estimator = "MLR",
+    std.lv    = TRUE,
+    cluster   = cluster_var,
+    control   = list(iter.max = 500)
+  )
+
+  std_solution <- standardizedSolution(fit, type = "std.all", se = TRUE, ci = TRUE) %>%
+    filter(op %in% c("~", "=~")) %>%
+    mutate(
+      p_fmt   = ifelse(pvalue < 0.001, "p < 0.001", sprintf("p = %.3f", pvalue)),
+      est_str = sprintf("%.3f [%.3f, %.3f], %s", est.std, ci.lower, ci.upper, p_fmt),
+      model   = model_name
+    ) %>%
+    select(model, Path = lhs, Relation = op, Predictor = rhs, `Estimate [95% CI], p` = est_str)
+
+  fit_idx <- fitMeasures(fit, c("cfi.robust", "tli.robust", "rmsea.robust", "srmr", "aic", "bic"))
+
+  fit_df <- tibble::tibble(
+    model    = model_name,
+    fit_type = names(fit_idx),
+    fit_value = round(fit_idx, 3)
+  )
+
+  list(fit_object = fit, std_solution = std_solution, fit_df = fit_df)
+}
+
+
+# Helper to pivot results into wide-format table
+make_wide_table <- function(results_list) {
+  coef_wide <- bind_rows(map(results_list, "std_solution")) %>%
+    unite("Effect", Path, Relation, Predictor, sep = " ") %>%
+    pivot_wider(names_from = model, values_from = `Estimate [95% CI], p`)
+
+  fit_wide <- bind_rows(map(results_list, "fit_df")) %>%
+    pivot_wider(names_from = model, values_from = fit_value) %>%
+    rename(Effect = fit_type) %>%
+    mutate(across(everything(), as.character))
+
+  bind_rows(coef_wide, fit_wide)
+}
+
+
+# =============================================================================
+# SECTION 3: PRIMARY SEM MODELS A-D (TABLE 3)
+# =============================================================================
+
+model_A <- '
+  SocioEcon =~ gdp_per_capita_z + life_expectancy_z + mean_years_schooling_z
+  SocioEcon ~ displaced_pct_z + battle_deaths_z
+  displaced_pct_z ~ battle_deaths_z
+  wb_measles_incidence_z ~ SocioEcon + battle_deaths_z + displaced_pct_z
+'
+
+model_B <- '
+  SocioEcon =~ gdp_per_capita_z + life_expectancy_z + mean_years_schooling_z
+  SocioEcon ~ displaced_pct_z + battle_deaths_z + battle_deaths_z_lag1
+  displaced_pct_z ~ battle_deaths_z + battle_deaths_z_lag1
+  battle_deaths_z ~ battle_deaths_z_lag1
+  wb_measles_incidence_z ~ SocioEcon + battle_deaths_z + displaced_pct_z + battle_deaths_z_lag1
+'
+
+model_C <- '
+  SocioEcon =~ gdp_per_capita_z + life_expectancy_z + mean_years_schooling_z
+  SocioEcon ~ displaced_pct_z + battle_deaths_z
+  displaced_pct_z ~ battle_deaths_z
+  wb_measles_incidence_rate_1M_z ~ SocioEcon + battle_deaths_z + displaced_pct_z
+'
+
+model_D <- '
+  SocioEcon =~ gdp_per_capita_z + life_expectancy_z + mean_years_schooling_z
+  SocioEcon ~ displaced_pct_z + battle_deaths_z + battle_deaths_z_lag1
+  displaced_pct_z ~ battle_deaths_z + battle_deaths_z_lag1
+  battle_deaths_z ~ battle_deaths_z_lag1
+  wb_measles_incidence_rate_1M_z ~ SocioEcon + battle_deaths_z + displaced_pct_z + battle_deaths_z_lag1
+'
+
+primary_models <- list(A = model_A, B = model_B, C = model_C, D = model_D)
+
+primary_results <- imap(primary_models, ~ extract_sem_results(.x, .y, semds_std))
+table_3         <- make_wide_table(primary_results)
+
+print(table_3, n = Inf, width = Inf)
+write.csv(table_3, "./results/Table3_Primary_SEM.csv", row.names = FALSE)
+
+
+# =============================================================================
+# SECTION 4: FIXED-EFFECTS PANEL REGRESSIONS (TABLE 2)
+# =============================================================================
+
+# Cluster-robust SE extraction
+extract_fe_cell <- function(model, var) {
+  if (!var %in% names(coef(model))) return(NA_character_)
+
+  vcov_r <- plm::vcovHC(model, method = "arellano", type = "HC1", cluster = "group")
+  ct     <- lmtest::coeftest(model, vcov. = vcov_r)
+  ci     <- lmtest::coefci(model,   vcov. = vcov_r)
+
+  sprintf("%.2f [%.2f, %.2f], p = %.2f",
+          ct[var, "Estimate"],
+          ci[var, 1], ci[var, 2],
+          ct[var, "Pr(>|t|)"])
+}
+
+run_fe <- function(dv, ivs, data) {
+  f <- as.formula(paste(dv, "~", paste(ivs, collapse = " + ")))
+  plm(f, data = data, index = c("country.code", "year"),
+      model = "within", effect = "individual")
+}
+
+bd     <- "battle_deaths_z";      bd_lag <- "battle_deaths_z_lag1"
+displ  <- "displaced_pct_z";      gdp    <- "gdp_per_capita_z"
+cov    <- "mean_coverage_z";      measles <- "wb_measles_incidence_z"
+
+fe_models <- list(
+  M1  = run_fe(gdp,     c(bd),                          semds_std),
+  M2  = run_fe(gdp,     c(bd_lag),                      semds_std),
+  M3  = run_fe(gdp,     c(bd, displ),                   semds_std),
+  M4  = run_fe(gdp,     c(bd, displ, cov),               semds_std),
+  M5  = run_fe(gdp,     c(bd, bd_lag, displ, cov),       semds_std),
+  M6  = run_fe(displ,   c(bd),                          semds_std),
+  M7  = run_fe(displ,   c(bd_lag),                      semds_std),
+  M8  = run_fe(displ,   c(bd, gdp),                     semds_std),
+  M9  = run_fe(displ,   c(bd, gdp, cov),                semds_std),
+  M10 = run_fe(displ,   c(bd, bd_lag, gdp, cov),         semds_std),
+  M11 = run_fe(bd,      c(bd_lag),                      semds_std),
+  M12 = run_fe(bd,      c(displ),                       semds_std),
+  M13 = run_fe(bd,      c(bd_lag, displ, gdp),           semds_std),
+  M14 = run_fe(bd,      c(bd_lag, displ, gdp, cov),      semds_std),
+  M15 = run_fe(measles, c(bd),                          semds_std),
+  M16 = run_fe(measles, c(bd_lag),                      semds_std),
+  M17 = run_fe(measles, c(bd, displ),                   semds_std),
+  M18 = run_fe(measles, c(bd, displ, gdp),               semds_std),
+  M19 = run_fe(measles, c(bd, displ, gdp, cov),          semds_std),
+  M20 = run_fe(measles, c(bd, bd_lag, displ, gdp, cov),  semds_std)
+)
+
+col_vars <- c(bd, bd_lag, displ, gdp, cov)
+col_labs <- c("BRDs", "BRDs (lagged)", "Population displacement",
+              "GDP per Capita", "Mean Vaccination Coverage")
+
+table_2 <- data.frame(Model = paste0("Model ", 1:20))
+for (i in seq_along(col_vars)) {
+  table_2[[col_labs[i]]] <- sapply(fe_models, extract_fe_cell, var = col_vars[i])
+}
+
+print(table_2)
+write.csv(table_2, "./results/Table2_FixedEffects.csv", row.names = FALSE)
+
+
+# =============================================================================
+# SECTION 5: FIRST-DIFFERENCE SEM (S10 TABLE)
+# =============================================================================
+
+semds_diff <- semds_std %>%
+  arrange(country.code, year) %>%
+  group_by(country.code) %>%
+  mutate(
+    d_wb_measles_incidence_z  = wb_measles_incidence_z  - lag(wb_measles_incidence_z),
+    d_gdp_per_capita_z        = gdp_per_capita_z        - lag(gdp_per_capita_z),
+    d_life_expectancy_z       = life_expectancy_z       - lag(life_expectancy_z),
+    d_mean_years_schooling_z  = mean_years_schooling_z  - lag(mean_years_schooling_z),
+    d_battle_deaths_z         = battle_deaths_z         - lag(battle_deaths_z),
+    d_displaced_pct_z         = displaced_pct_z         - lag(displaced_pct_z)
+  ) %>%
+  ungroup() %>%
+  filter(!is.na(d_battle_deaths_z))
+
+model_diff <- '
+  dSocioEcon =~ d_gdp_per_capita_z + d_life_expectancy_z + d_mean_years_schooling_z
+  dSocioEcon ~ d_displaced_pct_z + d_battle_deaths_z
+  d_displaced_pct_z ~ d_battle_deaths_z
+  d_wb_measles_incidence_z ~ dSocioEcon + d_battle_deaths_z + d_displaced_pct_z
+'
+
+diff_results <- extract_sem_results(model_diff, "S10_FirstDiff", semds_diff,
+                                    cluster_var = "country.code")
+
+# Print and export
+print(diff_results$std_solution, n = Inf)
+write.csv(diff_results$std_solution,
+          "./results/S10_FirstDifference_SEM.csv", row.names = FALSE)
+
+
+# =============================================================================
+# SECTION 6: EXTENDED 3-YEAR LAG MODELS + WALD TESTS (S11 TABLE)
+# =============================================================================
+
+# --- 6.1 Create additional lag variables ---
+semds_std1 <- semds_std %>%
+  group_by(country.code) %>%
+  arrange(year) %>%
+  mutate(
+    battle_deaths_z_lag2 = lag(battle_deaths_z, 2),
+    battle_deaths_z_lag3 = lag(battle_deaths_z, 3)
+  ) %>%
+  ungroup()
+
+# --- 6.2 Model E: 3-year lags on measles case counts (Model AA in paper) ---
+model_E <- '
+  SocioEcon =~ gdp_per_capita_z + life_expectancy_z + mean_years_schooling_z
+  SocioEcon ~ displaced_pct_z + battle_deaths_z + battle_deaths_z_lag1 +
+              battle_deaths_z_lag2 + battle_deaths_z_lag3
+  displaced_pct_z ~ battle_deaths_z + battle_deaths_z_lag1 +
+                    battle_deaths_z_lag2 + battle_deaths_z_lag3
+  wb_measles_incidence_z ~ SocioEcon + battle_deaths_z + battle_deaths_z_lag1 +
+                           battle_deaths_z_lag2 + battle_deaths_z_lag3
+'
+
+# --- 6.3 Model F: 3-year lags on measles incidence rate (Model BB in paper) ---
+model_F <- '
+  SocioEcon =~ gdp_per_capita_z + life_expectancy_z + mean_years_schooling_z
+  SocioEcon ~ displaced_pct_z + battle_deaths_z + battle_deaths_z_lag1 +
+              battle_deaths_z_lag2 + battle_deaths_z_lag3
+  displaced_pct_z ~ battle_deaths_z + battle_deaths_z_lag1 +
+                    battle_deaths_z_lag2 + battle_deaths_z_lag3
+  wb_measles_incidence_rate_1M_z ~ SocioEcon + battle_deaths_z + battle_deaths_z_lag1 +
+                                   battle_deaths_z_lag2 + battle_deaths_z_lag3
+'
+
+lag_models <- list(mE = model_E, mF = model_F)
+lag_results <- imap(lag_models, ~ extract_sem_results(.x, .y, semds_std1))
+table_s11   <- make_wide_table(lag_results)
+
+print(table_s11, n = Inf, width = Inf)
+write.csv(table_s11, "./results/S11_ExtendedLag_SEM.csv", row.names = FALSE)
+
+# --- 6.4 Wald tests for joint significance of all lag terms ---
+
+# Model E with labels (for Wald test)
+model_E_labeled <- '
+  SocioEcon =~ gdp_per_capita_z + life_expectancy_z + mean_years_schooling_z
+  SocioEcon ~ displaced_pct_z + battle_deaths_z + battle_deaths_z_lag1 +
+              battle_deaths_z_lag2 + battle_deaths_z_lag3
+  displaced_pct_z ~ battle_deaths_z + battle_deaths_z_lag1 +
+                    battle_deaths_z_lag2 + battle_deaths_z_lag3
+  wb_measles_incidence_z ~ SocioEcon +
+    l0*battle_deaths_z + l1*battle_deaths_z_lag1 +
+    l2*battle_deaths_z_lag2 + l3*battle_deaths_z_lag3
+'
+
+fit_E_wald <- sem(model_E_labeled, data = semds_std1,
+                  missing = "fiml", estimator = "MLR",
+                  cluster = "country.code", std.lv = TRUE)
+
+wald_E <- lavTestWald(fit_E_wald, constraints = "l0==0\nl1==0\nl2==0\nl3==0")
+cat("\n--- Wald Test: Model E (Measles Cases, Lags 0-3) ---\n")
+print(wald_E)
+
+# Model F with labels (for Wald test)
+model_F_labeled <- '
+  SocioEcon =~ gdp_per_capita_z + life_expectancy_z + mean_years_schooling_z
+  SocioEcon ~ displaced_pct_z + battle_deaths_z + battle_deaths_z_lag1 +
+              battle_deaths_z_lag2 + battle_deaths_z_lag3
+  displaced_pct_z ~ battle_deaths_z + battle_deaths_z_lag1 +
+                    battle_deaths_z_lag2 + battle_deaths_z_lag3
+  wb_measles_incidence_rate_1M_z ~ SocioEcon +
+    r0*battle_deaths_z + r1*battle_deaths_z_lag1 +
+    r2*battle_deaths_z_lag2 + r3*battle_deaths_z_lag3
+'
+
+fit_F_wald <- sem(model_F_labeled, data = semds_std1,
+                  missing = "fiml", estimator = "MLR",
+                  cluster = "country.code", std.lv = TRUE)
+
+wald_F <- lavTestWald(fit_F_wald, constraints = "r0==0\nr1==0\nr2==0\nr3==0")
+cat("\n--- Wald Test: Model F (Measles Incidence Rate, Lags 0-3) ---\n")
+print(wald_F)
+
+cat("\nReplication complete. Results written to ./results/\n")
