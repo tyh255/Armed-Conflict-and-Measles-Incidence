@@ -1,27 +1,23 @@
-# =============================================================================
-# REPLICATION CODE: "The Association of Armed Conflict with Global Measles Cases:
-# A Structural Equation Modeling Analysis of 193 Countries from 2000 to 2023"
-# Headley TY & Tozan Y | PLOS Medicine
+# Replication code for Headley & Tozan, "The Association of Armed Conflict
+# with Global Measles Cases: A Structural Equation Modeling Analysis of
+# 193 Countries from 2000 to 2023." PLOS Medicine.
 #
-# This script replicates:
-#   - Primary SEM models A-D (Table 3)
-#   - Fixed-effects panel regressions (Table 2)
-#   - First-difference SEM (S10 Table)
-#   - Extended 3-year lag SEM + Wald tests (S11 Table)
+# Reproduces:
+#   - Table 2 (country FE panels, 20 specs)
+#   - Table 3 (main SEMs, Models A-D)
+#   - S10 (first-difference SEM)
+#   - S11 (3-year lag SEM with joint Wald tests)
 #
-# REQUIREMENTS:
-#   Input files (place in ./data/ subdirectory):
-#     - vaccination_thresholds.csv
-#     - WHO Measles Incidence.csv
-#     - WHO_Measles Case Incidence_Per Million.csv
-#     - IHME Measles Incidence.csv
-#     - hdr-data.csv
-#     - WB_Health Expenditures.csv
-#     - WB_TB Incidence Rate.csv
-#     - UNHCR_persons_of_concern.csv
-#
-#   R packages: dplyr, tidyr, tidyverse, lavaan, semTools, purrr, plm, lmtest
-# =============================================================================
+# Expected inputs in ./data/:
+#   vaccination_thresholds.csv
+#   WHO Measles Incidence.csv
+#   WHO_Measles Case Incidence_Per Million.csv
+#   IHME Measles Incidence.csv
+#   hdr-data.csv
+#   WB_Health Expenditures.csv
+#   WB_TB Incidence Rate.csv
+#   UNHCR_persons_of_concern.csv
+
 
 library(dplyr)
 library(tidyr)
@@ -32,11 +28,10 @@ library(purrr)
 library(plm)
 library(lmtest)
 
-# =============================================================================
-# SECTION 1: DATA PREPARATION
-# =============================================================================
 
-# --- 1.1 Load and reshape base dataset ---
+####### Data prep #######
+
+# Base panel: vaccination coverage collapsed to one row per country-year.
 semds <- read.csv('./data/vaccination_thresholds.csv')
 
 semds <- semds %>%
@@ -53,10 +48,10 @@ semds <- semds %>%
   ) %>%
   ungroup()
 
-# --- 1.2 WHO measles case counts ---
+# WHO measles case counts. Country labels differ from our key, so patch by hand
+# before joining.
 who_measles <- read.csv('./data/WHO Measles Incidence.csv')
 
-# Harmonise country names
 who_measles$Country...Region[who_measles$Country...Region == "Côte d'Ivoire"]         <- "Cote d'Ivoire"
 who_measles$Country...Region[who_measles$Country...Region == "occupied Palestinian territory, including east Jerusalem"] <- "State of Palestine"
 who_measles$Country...Region[who_measles$Country...Region == "Türkiye"]               <- "Turkiye"
@@ -72,7 +67,7 @@ colnames(who_measles_long)[c(1, 3, 4)] <- c("Country", "Year", "Incidence")
 semds <- semds %>%
   left_join(who_measles_long %>% select(Country, Year, Incidence), by = c("Country", "Year"))
 
-# --- 1.3 WHO measles incidence rate (per million) ---
+# Same WHO source but the per-million rate (used as the outcome in Models C/D).
 who_measles_i <- read.csv('./data/WHO_Measles Case Incidence_Per Million.csv')
 
 who_measles_i$Country...Region[who_measles_i$Country...Region == "Côte d'Ivoire"]    <- "Cote d'Ivoire"
@@ -92,7 +87,7 @@ semds <- semds %>%
   left_join(who_measles_long_i %>% select(Country, Year, Incidence_Rate_1M),
             by = c("Country", "Year"), relationship = "many-to-many")
 
-# --- 1.4 IHME measles incidence ---
+# IHME estimates — kept around as a cross-check on the WHO numbers.
 ihme_measles <- read.csv('./data/IHME Measles Incidence.csv')
 
 ihme_measles$location_name[ihme_measles$location_name == "Côte d'Ivoire"]            <- "Cote d'Ivoire"
@@ -108,7 +103,8 @@ ihme_wide <- ihme_measles %>%
 semds <- semds %>%
   left_join(ihme_wide, by = c("Country" = "location_name", "Year" = "year"))
 
-# --- 1.5 HDI indicators (life expectancy, mean years schooling) ---
+# HDI: life expectancy + mean years of schooling. Together with GDP these form
+# the latent SocioEcon construct downstream.
 hdi <- read.csv('./data/hdr-data.csv')
 
 hdi_wide <- hdi %>%
@@ -118,7 +114,8 @@ hdi_wide <- hdi %>%
 semds <- semds %>%
   left_join(hdi_wide, by = c("Country.Code" = "countryIsoCode", "Year" = "year"))
 
-# --- 1.6 World Bank: health expenditure and TB incidence ---
+# World Bank: health spending (% of GDP) and TB incidence. TB is only used as a
+# robustness covariate.
 wbh <- read.csv('./data/WB_Health Expenditures.csv')
 wbh <- wbh[wbh$Series.Name == "Current health expenditure (% of GDP)", ]
 
@@ -140,7 +137,8 @@ semds <- semds %>%
   left_join(wbh_long,  by = c("Country.Code", "Year")) %>%
   left_join(wbtb_long, by = c("Country.Code", "Year"))
 
-# --- 1.7 UNHCR displacement totals ---
+# UNHCR persons of concern. We sum the four categories and express as a share
+# of population.
 un_disp <- read.csv('./data/UNHCR_persons_of_concern.csv')
 un_disp$New_Displacement_Total <- un_disp$Refugees + un_disp$Asylum.seekers +
   un_disp$IDPs + un_disp$Others.of.concern
@@ -151,7 +149,7 @@ semds <- semds %>%
             by = c("Country.Code", "Year"))
 semds$displaced_pct_new <- semds$New_Displacement_Total / semds$Population
 
-# --- 1.8 Create analysis subset ---
+# Trim to the columns we actually use and give them tidier names.
 semds_subset <- semds %>%
   select(
     country.code                 = Country.Code,
@@ -174,10 +172,11 @@ semds_subset <- semds %>%
   ) %>%
   distinct(country.code, year, .keep_all = TRUE)
 
-# --- 1.9 Standardize variables ---
+# Scale everything. Counts get log1p first because they're hugely right-skewed
+# — battle deaths in particular: most country-years are zero, a handful are in
+# the six figures.
 semds_std <- semds_subset %>%
   mutate(
-    # log1p-transform skewed count variables, then z-score
     across(
       c(total_displacement, gdp_per_capita, battle_deaths,
         population, wb_measles_incidence, wb_measles_incidence_rate_1M,
@@ -185,7 +184,6 @@ semds_std <- semds_subset %>%
       ~ scale(log1p(.x))[, 1],
       .names = "{.col}_z"
     ),
-    # z-score continuous/rate variables
     across(
       c(displaced_pct, ihme_measles_rate, life_expectancy,
         mean_years_schooling, health_portion_gdp, mean_coverage, MCV1),
@@ -194,7 +192,7 @@ semds_std <- semds_subset %>%
     )
   )
 
-# --- 1.10 Create lagged variables ---
+# One-year lags for the lagged-conflict specifications.
 semds_std <- semds_std %>%
   group_by(country.code) %>%
   arrange(year, .by_group = TRUE) %>%
@@ -207,13 +205,11 @@ semds_std <- semds_std %>%
   ungroup()
 
 
-# =============================================================================
-# SECTION 2: HELPER FUNCTION FOR SEM EXTRACTION
-# =============================================================================
+####### SEM helpers #######
 
-# Fits a SEM and returns standardized coefficients with 95% CIs, p-values,
-# and robust fit indices (CFI, TLI, RMSEA, SRMR, AIC, BIC).
-
+# Fit a model and pull out what we actually want for the tables: standardized
+# coefs with 95% CIs and p-values, plus the usual robust fit indices. Pass a
+# cluster variable to get cluster-robust SEs (needed for the FD model).
 extract_sem_results <- function(model_syntax, model_name, data,
                                 cluster_var = NULL) {
   fit <- sem(
@@ -247,7 +243,7 @@ extract_sem_results <- function(model_syntax, model_name, data,
 }
 
 
-# Helper to pivot results into wide-format table
+# Stack several model results side-by-side for the manuscript tables.
 make_wide_table <- function(results_list) {
   coef_wide <- bind_rows(map(results_list, "std_solution")) %>%
     unite("Effect", Path, Relation, Predictor, sep = " ") %>%
@@ -262,9 +258,11 @@ make_wide_table <- function(results_list) {
 }
 
 
-# =============================================================================
-# SECTION 3: PRIMARY SEM MODELS A-D (TABLE 3)
-# =============================================================================
+####### Table 3: main SEMs #######
+#
+# A / C: contemporaneous battle deaths only.
+# B / D: add a 1-year lag.
+# A / B use measles case counts; C / D use the per-million incidence rate.
 
 model_A <- '
   SocioEcon =~ gdp_per_capita_z + life_expectancy_z + mean_years_schooling_z
@@ -305,11 +303,13 @@ print(table_3, n = Inf, width = Inf)
 write.csv(table_3, "./results/Table3_Primary_SEM.csv", row.names = FALSE)
 
 
-# =============================================================================
-# SECTION 4: FIXED-EFFECTS PANEL REGRESSIONS (TABLE 2)
-# =============================================================================
+# ####### Table 2: country fixed-effects panels #######
+#
+# 20 specs across four outcomes (GDP, displacement, battle deaths, measles)
+# with varying covariate sets. All within-country FE, Arellano-style
+# cluster-robust SEs.
 
-# Cluster-robust SE extraction
+# pull one (coef, CI, p) cell out as a formatted string
 extract_fe_cell <- function(model, var) {
   if (!var %in% names(coef(model))) return(NA_character_)
 
@@ -329,6 +329,7 @@ run_fe <- function(dv, ivs, data) {
       model = "within", effect = "individual")
 }
 
+# shorthands
 bd     <- "battle_deaths_z";      bd_lag <- "battle_deaths_z_lag1"
 displ  <- "displaced_pct_z";      gdp    <- "gdp_per_capita_z"
 cov    <- "mean_coverage_z";      measles <- "wb_measles_incidence_z"
@@ -369,9 +370,10 @@ print(table_2)
 write.csv(table_2, "./results/Table2_FixedEffects.csv", row.names = FALSE)
 
 
-# =============================================================================
-# SECTION 5: FIRST-DIFFERENCE SEM (S10 TABLE)
-# =============================================================================
+# ####### S10: first-difference SEM #######
+#
+# Differencing within country sweeps out time-invariant confounders. Same
+# structure as Model A, just on first differences.
 
 semds_diff <- semds_std %>%
   arrange(country.code, year) %>%
@@ -397,17 +399,17 @@ model_diff <- '
 diff_results <- extract_sem_results(model_diff, "S10_FirstDiff", semds_diff,
                                     cluster_var = "country.code")
 
-# Print and export
 print(diff_results$std_solution, n = Inf)
 write.csv(diff_results$std_solution,
           "./results/S10_FirstDifference_SEM.csv", row.names = FALSE)
 
 
-# =============================================================================
-# SECTION 6: EXTENDED 3-YEAR LAG MODELS + WALD TESTS (S11 TABLE)
-# =============================================================================
+# ####### S11: extended (0-3 yr) lag SEM + Wald tests #######
+#
+# Pushes the lag horizon out to three years to check the lag-1 result in B/D
+# isn't masking effects at a longer horizon. The two Wald tests at the end
+# check joint significance of all four battle-deaths terms on measles.
 
-# --- 6.1 Create additional lag variables ---
 semds_std1 <- semds_std %>%
   group_by(country.code) %>%
   arrange(year) %>%
@@ -417,7 +419,7 @@ semds_std1 <- semds_std %>%
   ) %>%
   ungroup()
 
-# --- 6.2 Model E: 3-year lags on measles case counts (Model AA in paper) ---
+# E = case counts (Model AA in the paper)
 model_E <- '
   SocioEcon =~ gdp_per_capita_z + life_expectancy_z + mean_years_schooling_z
   SocioEcon ~ displaced_pct_z + battle_deaths_z + battle_deaths_z_lag1 +
@@ -428,7 +430,7 @@ model_E <- '
                            battle_deaths_z_lag2 + battle_deaths_z_lag3
 '
 
-# --- 6.3 Model F: 3-year lags on measles incidence rate (Model BB in paper) ---
+# F = incidence rate (Model BB in the paper)
 model_F <- '
   SocioEcon =~ gdp_per_capita_z + life_expectancy_z + mean_years_schooling_z
   SocioEcon ~ displaced_pct_z + battle_deaths_z + battle_deaths_z_lag1 +
@@ -446,9 +448,7 @@ table_s11   <- make_wide_table(lag_results)
 print(table_s11, n = Inf, width = Inf)
 write.csv(table_s11, "./results/S11_ExtendedLag_SEM.csv", row.names = FALSE)
 
-# --- 6.4 Wald tests for joint significance of all lag terms ---
-
-# Model E with labels (for Wald test)
+# Refit with labeled coefficients so we can constrain them in the Wald test.
 model_E_labeled <- '
   SocioEcon =~ gdp_per_capita_z + life_expectancy_z + mean_years_schooling_z
   SocioEcon ~ displaced_pct_z + battle_deaths_z + battle_deaths_z_lag1 +
@@ -465,10 +465,9 @@ fit_E_wald <- sem(model_E_labeled, data = semds_std1,
                   cluster = "country.code", std.lv = TRUE)
 
 wald_E <- lavTestWald(fit_E_wald, constraints = "l0==0\nl1==0\nl2==0\nl3==0")
-cat("\n--- Wald Test: Model E (Measles Cases, Lags 0-3) ---\n")
+cat("\n--- Wald: Model E (cases, lags 0-3 jointly) ---\n")
 print(wald_E)
 
-# Model F with labels (for Wald test)
 model_F_labeled <- '
   SocioEcon =~ gdp_per_capita_z + life_expectancy_z + mean_years_schooling_z
   SocioEcon ~ displaced_pct_z + battle_deaths_z + battle_deaths_z_lag1 +
@@ -485,7 +484,7 @@ fit_F_wald <- sem(model_F_labeled, data = semds_std1,
                   cluster = "country.code", std.lv = TRUE)
 
 wald_F <- lavTestWald(fit_F_wald, constraints = "r0==0\nr1==0\nr2==0\nr3==0")
-cat("\n--- Wald Test: Model F (Measles Incidence Rate, Lags 0-3) ---\n")
+cat("\n--- Wald: Model F (rate, lags 0-3 jointly) ---\n")
 print(wald_F)
 
-cat("\nReplication complete. Results written to ./results/\n")
+cat("\nDone. Output CSVs are in ./results/\n")
