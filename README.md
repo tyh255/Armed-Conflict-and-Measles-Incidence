@@ -13,16 +13,6 @@ The study examines direct and indirect pathways linking armed conflict, populati
 
 ---
 
-## Repository Structure
-
-```
-/
-├── conflict_measles_replication.R   # Main replication script (all analyses)
-└── README.md                        # This file
-```
-
----
-
 ## Requirements
 
 ### R version
@@ -100,23 +90,3 @@ The script is organized into six sequential sections and must be run in order, a
 **First-difference SEM.** This model operates on year-over-year changes in all variables and is clustered by country. It is reported in Supporting Table S10.
 
 **Extended lag models.** Models E and F include conflict exposure at lags 0 through 3 years. Wald tests assess joint significance of all lag terms simultaneously. These are reported in Supporting Table S11.
-
----
-
-## Correspondence
-
-For questions about the code or data, please contact:
-
-**Yesim Tozan, PhD**  
-School of Global Public Health, New York University  
-Email: tozan@nyu.edu
-
----
-
-## Citation
-
-If you use this code, please cite the original manuscript:
-
-> Headley TY, Tozan Y. The association of armed conflict with global measles cases: a structural equation modeling analysis of 193 countries from 2000 to 2023. *PLOS Medicine*. 2026.
-
----
